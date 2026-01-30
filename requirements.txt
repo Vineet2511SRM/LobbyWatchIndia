@@ -1,3 +1,4 @@
-Pandas
+pandas
 scikit-learn
 joblib
+streamlit
