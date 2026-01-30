@@ -1,16 +1,4 @@
-"""
-Train a text classifier that predicts `relation_type` from `text`.
-
-This script:
-1) Loads data/training_data.csv
-2) Splits into X (text) and y (relation_type)
-3) Builds a model using:
-   - TfidfVectorizer
-   - LogisticRegression
-4) Trains the model
-5) Prints accuracy
-6) Saves the trained pipeline as model/model.pkl
-"""
+# Train a text classifier that predicts `relation_type` from `text`.
 
 from __future__ import annotations
 
@@ -67,7 +55,7 @@ def main() -> None:
     model: Pipeline = Pipeline(
         steps=[
             ("tfidf", TfidfVectorizer()),
-            ("clf", LogisticRegression(max_iter=1000)),
+            ("clf", LogisticRegression(max_iter=1000, class_weight="balanced")),
         ]
     )
 
@@ -82,10 +70,11 @@ def main() -> None:
     acc = accuracy_score(y_test, y_pred)
     print(f"Accuracy: {acc:.4f}  (test size: {len(y_test)})")
 
-    # 6) Save model
+    # 6) Save full pipeline (vectorizer + classifier) in one file for app
     model_dir.mkdir(parents=True, exist_ok=True)
     joblib.dump(model, model_path)
     print(f"Saved model to: {model_path}")
+    print("Model training done successfully.")
 
 
 if __name__ == "__main__":
