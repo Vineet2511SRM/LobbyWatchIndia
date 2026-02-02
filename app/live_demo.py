@@ -13,6 +13,10 @@ from datetime import datetime, timedelta
 import json
 import sys
 from pathlib import Path
+import networkx as nx
+import plotly.graph_objects as go
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 
 # Add project root to path
 project_root = Path(__file__).parent.parent
@@ -506,89 +510,68 @@ def analyze_relationships(articles_df, threshold, methods):
     relationships = []
     articles = articles_df.to_dict('records')
     
-    for i in range(len(articles)):
-        for j in range(i + 1, len(articles)):
-            article1 = articles[i]
-            article2 = articles[j]
+def analyze_relationships(articles_df, threshold, methods):
+    """Analyze relationships using TF-IDF and Cosine Similarity"""
+    relationships = []
+    articles = articles_df.to_dict('records')
+    
+    # Prepare text corpus (Title + Description + Content)
+    corpus = []
+    for article in articles:
+        text = f"{article['title']} {article['description']} {article.get('content', '')}"
+        corpus.append(text)
+    
+    # TF-IDF Vectorization
+    try:
+        vectorizer = TfidfVectorizer(stop_words='english', max_features=5000)
+        tfidf_matrix = vectorizer.fit_transform(corpus)
+        
+        # Calculate Cosine Similarity Matrix
+        cosine_sim = cosine_similarity(tfidf_matrix, tfidf_matrix)
+        
+        # Extract relationships
+        for i in range(len(articles)):
+            # Get top related articles for article i
+            # We want to ensure at least some connections, so we might take top 2 regardless of threshold if they are decent
+            scores = list(enumerate(cosine_sim[i]))
+            scores = sorted(scores, key=lambda x: x[1], reverse=True)
             
-            # Calculate relationship strength based on selected methods
-            strength = 0
-            evidence_parts = []
-            
-            if "Keyword Overlap" in methods:
-                # Simple keyword overlap analysis
-                words1 = set(article1['title'].lower().split() + article1['description'].lower().split())
-                words2 = set(article2['title'].lower().split() + article2['description'].lower().split())
+            # Skip self (index 0 is self because sorted desc)
+            for j, score in scores[1:]: 
+                if j <= i: continue # Avoid duplicates (undirected)
                 
-                # Remove common words
-                common_words = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by', 'is', 'are', 'was', 'were', 'be', 'been', 'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could', 'should'}
-                words1 = words1 - common_words
-                words2 = words2 - common_words
+                # Check threshold or forced connection (top 1-2 matches even if weak, for the "chain" effect)
+                is_top_match = score > 0.15 # Lower "chain" threshold
                 
-                if words1 and words2:
-                    overlap = len(words1 & words2) / len(words1 | words2)
-                    strength += overlap * 0.4
-                    if overlap > 0.1:
-                        shared_words = list(words1 & words2)[:3]
-                        evidence_parts.append(f"Shared keywords: {', '.join(shared_words)}")
-            
-            if "Source Cross-reference" in methods:
-                # Same source bonus
-                if article1['source_name'] == article2['source_name']:
-                    strength += 0.2
-                    evidence_parts.append(f"Same source: {article1['source_name']}")
-            
-            if "Temporal Proximity" in methods:
-                # Time proximity
-                try:
-                    time1 = pd.to_datetime(article1['published_at'])
-                    time2 = pd.to_datetime(article2['published_at'])
-                    time_diff = abs((time1 - time2).total_seconds() / 3600)  # Hours
+                if score >= threshold or is_top_match:
+                    article1 = articles[i]
+                    article2 = articles[j]
                     
-                    if time_diff < 24:  # Within 24 hours
-                        temporal_score = max(0, (24 - time_diff) / 24) * 0.3
-                        strength += temporal_score
-                        evidence_parts.append(f"Published within {time_diff:.1f} hours")
-                except:
-                    pass
-            
-            if "Content Similarity" in methods:
-                # Simple content similarity (length and structure)
-                desc1 = article1['description']
-                desc2 = article2['description']
-                
-                if desc1 and desc2:
-                    # Length similarity
-                    len_sim = 1 - abs(len(desc1) - len(desc2)) / max(len(desc1), len(desc2))
-                    strength += len_sim * 0.1
+                    # Determine evidence (shared top keywords)
+                    feature_names = vectorizer.get_feature_names_out()
+                    # simplistic extraction of top shared words
+                    # (In a real app, we'd multiply vector i * vector j to find contributing terms)
                     
-                    if len_sim > 0.8:
-                        evidence_parts.append("Similar content structure")
-            
-            # Create relationship if above threshold
-            if strength >= threshold:
-                # Determine relationship type
-                if "Same source" in ' '.join(evidence_parts):
-                    rel_type = "Source Cross-reference"
-                elif "Shared keywords" in ' '.join(evidence_parts):
-                    rel_type = "Keyword Overlap"
-                elif "Published within" in ' '.join(evidence_parts):
-                    rel_type = "Temporal Proximity"
-                else:
-                    rel_type = "Content Similarity"
-                
-                relationships.append({
-                    "article1_id": i,
-                    "article2_id": j,
-                    "article1_title": article1['title'],
-                    "article2_title": article2['title'],
-                    "article1_source": article1['source_name'],
-                    "article2_source": article2['source_name'],
-                    "type": rel_type,
-                    "strength": min(strength, 1.0),  # Cap at 1.0
-                    "evidence": "; ".join(evidence_parts) if evidence_parts else "Detected similarity",
-                    "method": "Multi-factor Analysis"
-                })
+                    evidence = f"Similarity Score: {score:.2f}"
+                    
+                    relationships.append({
+                        "article1_id": i,
+                        "article2_id": j,
+                        "article1_title": article1['title'],
+                        "article2_title": article2['title'],
+                        "article1_source": article1['source_name'],
+                        "article2_source": article2['source_name'],
+                        "article1_date": article1.get('published_at', ''),
+                        "article2_date": article2.get('published_at', ''),
+                        "type": "Content Similarity",
+                        "strength": float(score),
+                        "evidence": evidence,
+                        "method": "TF-IDF & Cosine Similarity"
+                    })
+                    
+    except Exception as e:
+        st.error(f"Analysis failed: {str(e)}")
+        # Fallback?
     
     # Sort by strength
     relationships.sort(key=lambda x: x['strength'], reverse=True)
@@ -596,7 +579,7 @@ def analyze_relationships(articles_df, threshold, methods):
     return relationships
 
 def show_network_visualization():
-    """Network visualization"""
+    """Network visualization using Plotly"""
     st.header("Network Visualization")
     
     # Check if analysis is available
@@ -611,61 +594,151 @@ def show_network_visualization():
         st.warning("No relationships found to visualize.")
         return
     
-    # Network summary
-    st.subheader("Network Summary")
+    # Create Graph
+    G = nx.Graph()
     
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.metric("News Articles", len(articles_df))
-    with col2:
-        st.metric("Relationships", len(relationships))
-    with col3:
-        density = len(relationships) / (len(articles_df) * (len(articles_df) - 1) / 2) if len(articles_df) > 1 else 0
-        st.metric("Network Density", f"{density:.3f}")
-    with col4:
-        api_sources = articles_df['source_api'].nunique()
-        st.metric("API Sources", api_sources)
+    # Add nodes (articles)
+    for i, article in articles_df.iterrows():
+        # Format date for label (e.g., "28 Jan")
+        date_label = "Date?"
+        try:
+            if article.get('published_at'):
+                # Handle potential string formats or datetime objects
+                val = article['published_at']
+                if isinstance(val, str):
+                    # Attempt to parse common ISO formats if needed, but pd.to_datetime is robust
+                    dt = pd.to_datetime(val)
+                else:
+                    dt = val
+                date_label = dt.strftime('%d %b')
+        except:
+            date_label = str(article.get('published_at', ''))[:10]
+
+        G.add_node(i, 
+                   title=article['title'], 
+                   source=article['source_name'],
+                   date=article.get('published_at', 'Unknown'),
+                   label=date_label)
     
-    # Relationship strength distribution
-    st.subheader("Relationship Strength Analysis")
+    # Add edges (relationships)
+    for rel in relationships:
+        # Show edges more aggressively to ensure connections are visible
+        # If score > 0.15 (our low chain threshold), we show it
+        if rel['strength'] > 0.15:
+            G.add_edge(rel['article1_id'], rel['article2_id'], 
+                       weight=rel['strength'], 
+                       evidence=rel['evidence'])
+    
+    # Calculate layout - Force Directed
+    pos = nx.spring_layout(G, k=0.8, iterations=100) # Increased k for more spread, iterations for stability
+    
+    # Create Plotly traces
+    edge_x = []
+    edge_y = []
+    edge_text = [] # For hover info on edges if needed, though plotly scatter lines don't do hover well easily
+    
+    # Draw edges
+    for edge in G.edges(data=True):
+        x0, y0 = pos[edge[0]]
+        x1, y1 = pos[edge[1]]
+        edge_x.extend([x0, x1, None])
+        edge_y.extend([y0, y1, None])
+    
+    edge_trace = go.Scatter(
+        x=edge_x, y=edge_y,
+        line=dict(width=1, color='#FFFFFF'), # White lines for better visibility on dark bg
+        hoverinfo='none',
+        mode='lines')
+
+    # Draw nodes
+    node_x = []
+    node_y = []
+    node_text = []
+    node_color = []
+    hover_texts = []
+    
+    for node in G.nodes():
+        x, y = pos[node]
+        node_x.append(x)
+        node_y.append(y)
+        
+        # Color by source roughly (hashing the source name to a color value)
+        source = G.nodes[node]['source']
+        node_color.append(hash(source) % 100)
+        
+        # Hover text
+        info = f"<b>{G.nodes[node]['title']}</b><br>" + \
+               f"Source: {source}<br>" + \
+               f"Date: {G.nodes[node]['date']}"
+        hover_texts.append(info)
+        node_text.append(G.nodes[node]['label'])
+
+    node_trace = go.Scatter(
+        x=node_x, y=node_y,
+        mode='markers+text',
+        hoverinfo='text',
+        text=node_text,
+        textposition="middle center",
+        textfont=dict(
+            family="sans serif",
+            size=12,
+            color="black"  # Ensure text is visible
+        ),
+        hovertext=hover_texts,
+        marker=dict(
+            showscale=True,
+            colorscale='YlGnBu', # Lighter colors might be better for black text
+            reversescale=True,
+            color=node_color,
+            size=55, # Much larger to look like bubbles
+            opacity=0.8,
+            colorbar=dict(
+                thickness=15,
+                title=dict(
+                    text='Source Group',
+                    side='right'
+                ),
+                xanchor='left'
+            ),
+            line=dict(width=2, color='DarkSlateGrey')))
+
+    # Create figure
+    fig = go.Figure(data=[edge_trace, node_trace],
+                 layout=go.Layout(
+                    title=dict(
+                        text='<br>Article Relationship Network',
+                        font=dict(size=16)
+                    ),
+                    showlegend=False,
+                    hovermode='closest',
+                    margin=dict(b=20,l=5,r=5,t=40),
+                    annotations=[ dict(
+                        text="articles linked by content/time",
+                        showarrow=False,
+                        xref="paper", yref="paper",
+                        x=0.005, y=-0.002 ) ],
+                    xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+                    yaxis=dict(showgrid=False, zeroline=False, showticklabels=False))
+                    )
+    
+    st.plotly_chart(fig, width='stretch')
+    
+    # Connection details & Chain of Events
+    st.subheader("🔗 Connection Chains & Related Articles")
+    
+    # Simple algorithm to find "chains" - just showing neighbors of the selected node would be ideal
+    # But for now, let's list the top relationships in a readable "story" format
     
     if relationships:
-        strengths = [r['strength'] for r in relationships]
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            # Histogram
-            hist_data = pd.DataFrame({'Strength': strengths})
-            st.bar_chart(hist_data['Strength'].value_counts().sort_index())
-        
-        with col2:
-            # Statistics
-            st.write("**Strength Statistics:**")
-            st.write(f"• Maximum: {max(strengths):.3f}")
-            st.write(f"• Average: {sum(strengths)/len(strengths):.3f}")
-            st.write(f"• Minimum: {min(strengths):.3f}")
-            st.write(f"• Strong (>0.7): {sum(1 for s in strengths if s > 0.7)}")
-    
-    # Top connections
-    st.subheader("Strongest Connections")
-    
-    for i, rel in enumerate(relationships[:5]):
-        with st.expander(f"Connection {i+1}: {rel['type']} (Strength: {rel['strength']:.3f})"):
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                st.write("**Article 1:**")
-                st.write(f"{rel['article1_title']}")
-                st.write(f"{rel['article1_source']}")
-            
-            with col2:
-                st.write("**Article 2:**")
-                st.write(f"{rel['article2_title']}")
-                st.write(f"{rel['article2_source']}")
-            
-            st.write(f"**Evidence:** {rel['evidence']}")
-            st.write(f"**Method:** {rel['method']}")
+        for i, rel in enumerate(relationships[:10]):
+           with st.container():
+                st.markdown(f"""
+                **{str(rel['article1_date'])[:10]}** | {rel['article1_title']}  
+                ⬇️ *is linked to*  
+                **{str(rel['article2_date'])[:10]}** | {rel['article2_title']}
+                """, unsafe_allow_html=True)
+                st.caption(f"Reason: {rel['evidence']}")
+                st.divider()
 
 def show_analytics_dashboard():
     """Analytics dashboard"""
