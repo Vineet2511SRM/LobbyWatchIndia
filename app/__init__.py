@@ -1,1 +1,0 @@
-# NewsGraph application package
